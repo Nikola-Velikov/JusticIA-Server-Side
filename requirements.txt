@@ -1,5 +1,5 @@
 fastapi
 uvicorn
 pymongo
-elasticsearch
 google-generativeai
+elasticsearch==8.14.0
