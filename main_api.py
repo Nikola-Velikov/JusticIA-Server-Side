@@ -24,7 +24,7 @@ mongo_db = mongo_client[MONGO_DB]
 es = Elasticsearch(
     ES_URL,
     verify_certs=False,
-    request_timeout=60,        
+    request_timeout=60,
     retry_on_timeout=True,
     max_retries=3
 )
@@ -33,46 +33,68 @@ es = Elasticsearch(
 app = FastAPI(title="JusticIA API", description="Legal AI Assistant API", version="1.0.0")
 
 
+# ✅ CLEAN + INDEX FUNCTION
+def clean_document(doc):
+    """Sanitize MongoDB document keys for Elasticsearch."""
+    clean_doc = {}
+    for k, v in doc.items():
+        clean_key = re.sub(r'[.$]', '_', k)  # replace invalid chars
+        clean_doc[clean_key] = v
+    return clean_doc
+
+
 def index_mongo_to_es():
+    """Indexes all MongoDB collections into Elasticsearch safely."""
     for coll_name in MONGO_COLLECTIONS:
         collection = mongo_db[coll_name]
         docs = collection.find()
         actions = []
         error_count = 0
+        skipped = 0
+
+        print(f"🚀 Indexing collection: {coll_name}")
 
         for doc in docs:
             try:
                 doc_id = str(doc["_id"])
                 doc.pop("_id", None)
 
+                # Convert MongoDB types
                 for key, value in doc.items():
                     if isinstance(value, ObjectId):
                         doc[key] = str(value)
-                    elif hasattr(value, 'isoformat'):
+                    elif hasattr(value, "isoformat"):
                         doc[key] = value.isoformat()
 
-                action = {
-                    "_index": coll_name,
+                # Clean and prepare for ES
+                doc = clean_document(doc)
+
+                actions.append({
+                    "_index": coll_name.lower(),
                     "_id": doc_id,
                     "_source": doc
-                }
-                actions.append(action)
+                })
             except Exception as e:
                 error_count += 1
-                print(f"Error preparing doc: {e}")
+                print(f"⚠️ Skipped one doc in {coll_name}: {e}")
 
         if actions:
             try:
-                helpers.bulk(es, actions, raise_on_error=False)
-                print(f"Indexed {len(actions)} documents from {coll_name}")
+                helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
+                print(f"✅ Indexed {len(actions)} documents from {coll_name}")
             except BulkIndexError as e:
-                print(f"Bulk index error in {coll_name}")
+                print(f"❌ Bulk index error in {coll_name}")
                 for err in e.errors[:5]:
                     print(json.dumps(err, indent=2, ensure_ascii=False))
-                print(f"...and {len(e.errors)} more errors.\n")
+            except ApiError as e:
+                print(f"❌ Elasticsearch API error for {coll_name}: {e}")
+            except Exception as e:
+                print(f"💥 Unexpected error in {coll_name}: {e}")
 
         if error_count:
-            print(f"Skipped {error_count} documents in {coll_name} due to errors.")
+            print(f"⚠️ Skipped {error_count} invalid docs in {coll_name}")
+
+    print("🎯 Finished indexing all MongoDB collections into Elasticsearch.")
 
 
 def ask_gemini(prompt):
