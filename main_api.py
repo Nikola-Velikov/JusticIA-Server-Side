@@ -15,7 +15,7 @@ gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 # ⚙️ Database configuration
 MONGO_URI = "mongodb://mongo:kpBxiANKRFwHbakPiIIiVUgbzCFFsvyr@tramway.proxy.rlwy.net:30965"
 MONGO_DB = "legaldb"
-ES_URL = "http://elasticsearch-production-e1d2.up.railway.internal:9200"
+ES_URL = "https://elasticsearch-production-e1d2.up.railway.app"
 MONGO_COLLECTIONS = ["constitution", "codex", "laws", "implementableRegulations", "regulations", "rules"]
 MAX_RETRIES = 5
 
