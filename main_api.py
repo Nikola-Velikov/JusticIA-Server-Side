@@ -236,7 +236,11 @@ class Question(BaseModel):
 def home():
     return {"message": "JusticIA API is running. POST your question to /generate"}
 
-
+@app.post("/index")
+def index_all_data():
+    """Populate Elasticsearch from MongoDB collections."""
+    index_mongo_to_es()
+    return {"message": "Data indexed successfully."}
 @app.post("/generate")
 def generate(payload: Question):
     """Generate a summarized legal answer."""
