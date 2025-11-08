@@ -144,19 +144,25 @@ def extract_term_and_collection(question):
 
 
 def find_matching_indices(term, indices):
+    """Find indices in Elasticsearch that contain the search term."""
     matched = []
     for idx in indices:
-        res = es.search(index=idx, body={
-            "query": {
-                "multi_match": {
-                    "query": term,
-                    "fields": ["description"]
-                }
-            },
-            "size": 1
-        })
-        if res["hits"]["total"]["value"] > 0:
-            matched.append(idx)
+        if not idx:
+            continue
+        try:
+            res = es.search(index=idx, body={
+                "query": {
+                    "multi_match": {
+                        "query": term,
+                        "fields": ["description"]
+                    }
+                },
+                "size": 1
+            })
+            if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
+                matched.append(idx)
+        except Exception as e:
+            print(f"⚠️ Error searching in index '{idx}': {e}")
     return matched
 
 
@@ -228,21 +234,38 @@ def generate_term_with_retries(question):
 
 
 def handle_question(question):
+    """Process a legal question and return summarized legal info."""
     term, matched_indices, failed_terms = generate_term_with_retries(question)
+
     if not term:
         return {"error": "Не може да се намери термин с резултати."}
+    if not matched_indices:
+        return {"error": "Няма индекси с резултати за този термин."}
 
+    # Normalize indices
     if not isinstance(matched_indices[0], str):
         matched_indices = matched_indices[0]
+    matched_indices = [i for i in matched_indices if i]  # remove empty names
+    indices_str = ",".join(matched_indices)
 
+    print(f"🔍 Searching for term '{term}' in indices: {indices_str}")
+
+    # Generate DSL via Gemini
     detailed_dsl = generate_detailed_dsl(question, term, matched_indices)
+
+    # Search ES safely
+    try:
+        res = es.search(index=indices_str, body=detailed_dsl)
+    except Exception as e:
+        print(f"💥 Elasticsearch search error: {e}")
+        return {"error": f"Неуспешно търсене в Elasticsearch: {str(e)}"}
+
+    hits = res.get("hits", {}).get("hits", [])
+    if not hits:
+        return {"message": f"Няма намерени резултати за '{term}'."}
 
     all_hits = []
     sources = []
-
-    indices_str = ",".join(matched_indices)
-    res = es.search(index=indices_str, body=detailed_dsl)
-    hits = res["hits"]["hits"]
 
     for hit in hits:
         desc = hit["_source"].get("description", "")
@@ -253,7 +276,7 @@ def handle_question(question):
             "title": hit["_source"].get("title", "Без заглавие")
         })
 
-    summary = summarize_results(question, all_hits)
+    summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
 
     return {
         "term": term,
@@ -263,7 +286,6 @@ def handle_question(question):
         "sources": sources,
         "matches": all_hits
     }
-
 
 # 🧩 FastAPI Routes
 class Question(BaseModel):
