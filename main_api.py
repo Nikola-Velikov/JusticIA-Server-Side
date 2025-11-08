@@ -21,7 +21,13 @@ MAX_RETRIES = 5
 
 mongo_client = MongoClient(MONGO_URI)
 mongo_db = mongo_client[MONGO_DB]
-es = Elasticsearch(ES_URL)
+es = Elasticsearch(
+    ES_URL,
+    verify_certs=False,
+    request_timeout=60,        
+    retry_on_timeout=True,
+    max_retries=3
+)
 
 # ⚖️ FastAPI setup
 app = FastAPI(title="JusticIA API", description="Legal AI Assistant API", version="1.0.0")
