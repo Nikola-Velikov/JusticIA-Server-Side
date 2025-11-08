@@ -35,22 +35,27 @@ app = FastAPI(title="JusticIA API", description="Legal AI Assistant API", versio
 
 # ✅ CLEAN + INDEX FUNCTION
 def clean_document(doc):
-    """Sanitize MongoDB document keys for Elasticsearch."""
+    """Recursively sanitize MongoDB document keys for Elasticsearch."""
     clean_doc = {}
     for k, v in doc.items():
-        clean_key = re.sub(r'[.$]', '_', k)  # replace invalid chars
-        clean_doc[clean_key] = v
+        clean_key = re.sub(r'[.$]', '_', k)  # ES forbids '.' and '$' in field names
+        if isinstance(v, dict):
+            clean_doc[clean_key] = clean_document(v)
+        elif isinstance(v, list):
+            clean_doc[clean_key] = [clean_document(i) if isinstance(i, dict) else i for i in v]
+        else:
+            clean_doc[clean_key] = v
     return clean_doc
 
 
 def index_mongo_to_es():
-    """Indexes all MongoDB collections into Elasticsearch safely."""
+    """Indexes all MongoDB collections into Elasticsearch safely and completely."""
     for coll_name in MONGO_COLLECTIONS:
         collection = mongo_db[coll_name]
         docs = collection.find()
         actions = []
         error_count = 0
-        skipped = 0
+        total_indexed = 0
 
         print(f"🚀 Indexing collection: {coll_name}")
 
@@ -59,14 +64,14 @@ def index_mongo_to_es():
                 doc_id = str(doc["_id"])
                 doc.pop("_id", None)
 
-                # Convert MongoDB types
+                # Convert Mongo types
                 for key, value in doc.items():
                     if isinstance(value, ObjectId):
                         doc[key] = str(value)
                     elif hasattr(value, "isoformat"):
                         doc[key] = value.isoformat()
 
-                # Clean and prepare for ES
+                # Clean field names
                 doc = clean_document(doc)
 
                 actions.append({
@@ -74,6 +79,12 @@ def index_mongo_to_es():
                     "_id": doc_id,
                     "_source": doc
                 })
+
+                # Bulk every 500 docs for performance
+                if len(actions) >= 500:
+                    helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
+                    total_indexed += len(actions)
+                    actions = []
             except Exception as e:
                 error_count += 1
                 print(f"⚠️ Skipped one doc in {coll_name}: {e}")
@@ -81,20 +92,19 @@ def index_mongo_to_es():
         if actions:
             try:
                 helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
-                print(f"✅ Indexed {len(actions)} documents from {coll_name}")
+                total_indexed += len(actions)
             except BulkIndexError as e:
                 print(f"❌ Bulk index error in {coll_name}")
                 for err in e.errors[:5]:
                     print(json.dumps(err, indent=2, ensure_ascii=False))
-            except ApiError as e:
-                print(f"❌ Elasticsearch API error for {coll_name}: {e}")
             except Exception as e:
                 print(f"💥 Unexpected error in {coll_name}: {e}")
 
+        print(f"✅ Indexed {total_indexed} documents from {coll_name}")
         if error_count:
             print(f"⚠️ Skipped {error_count} invalid docs in {coll_name}")
 
-    print("🎯 Finished indexing all MongoDB collections into Elasticsearch.")
+    print("🎯 All MongoDB collections successfully indexed into Elasticsearch!")
 
 
 def ask_gemini(prompt):
