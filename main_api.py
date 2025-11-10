@@ -3,6 +3,7 @@ from elasticsearch import Elasticsearch, helpers
 from elasticsearch.helpers import BulkIndexError
 import json
 import re
+import ast
 import google.generativeai as genai
 from bson import ObjectId
 from fastapi import FastAPI
@@ -38,7 +39,7 @@ def clean_document(doc):
     """Recursively sanitize MongoDB document keys for Elasticsearch."""
     clean_doc = {}
     for k, v in doc.items():
-        clean_key = re.sub(r'[.$]', '_', k)  # ES forbids '.' and '$' in field names
+        clean_key = re.sub(r'[.$]', '_', k)
         if isinstance(v, dict):
             clean_doc[clean_key] = clean_document(v)
         elif isinstance(v, list):
@@ -64,14 +65,12 @@ def index_mongo_to_es():
                 doc_id = str(doc["_id"])
                 doc.pop("_id", None)
 
-                # Convert Mongo types
                 for key, value in doc.items():
                     if isinstance(value, ObjectId):
                         doc[key] = str(value)
                     elif hasattr(value, "isoformat"):
                         doc[key] = value.isoformat()
 
-                # Clean field names
                 doc = clean_document(doc)
 
                 actions.append({
@@ -80,7 +79,6 @@ def index_mongo_to_es():
                     "_source": doc
                 })
 
-                # Bulk every 500 docs for performance
                 if len(actions) >= 500:
                     helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
                     total_indexed += len(actions)
@@ -118,14 +116,14 @@ def ask_gemini(prompt):
 
 def extract_term_and_collection(question):
     prompt = f"""
-Ти си български правен асистент. Извлечи основния правен термин и предполагаемата колекция от следния въпрос:
+Ти си български правен асистент. Ако въпросът който е попитал потребителя няма нищо общо с правото му кажи, че не можеш да отговориш на този въпрос, ако е свързан тогава извлечи основния правен термин или го генерирай на базата на въпроса и предполагаемата колекция от следния въпрос:
 
 \"{question}\"
 
 Върни отговор във формат:
 {{
   "term": "ключов правен термин",
-  "collection":"constitution"- конституция, "codex", "laws"- закони, "implementableRegulations" - правилници по прилагане , "regulations"- правилници, "rules" - наредби, може и няколко
+  "collection": ["constitution", "codex", "laws", "implementableRegulations", "regulations", "rules"]
 }}
 
 Без обяснения, върни само JSON.
@@ -137,14 +135,30 @@ def extract_term_and_collection(question):
         json_end = output.find("}", json_start) + 1
         json_str = output[json_start:json_end]
         parsed = json.loads(json_str)
-        return parsed.get("term", "").lower(), parsed.get("collection", "")
+
+        term = parsed.get("term", "").lower()
+        collection = parsed.get("collection", [])
+
+        # ✅ FIX: always make collection a list
+        if isinstance(collection, str):
+            try:
+                evaluated = ast.literal_eval(collection)
+                if isinstance(evaluated, list):
+                    collection = evaluated
+                else:
+                    collection = [evaluated]
+            except Exception:
+                collection = [collection]
+        elif not isinstance(collection, list):
+            collection = [collection]
+
+        return term, collection
     except Exception as e:
         print("Failed to parse Gemini term response:", e)
-        return None, None
+        return None, []
 
 
 def find_matching_indices(term, indices):
-    """Find indices in Elasticsearch that contain the search term."""
     matched = []
     for idx in indices:
         if not idx:
@@ -184,7 +198,6 @@ def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
         return json.loads(json_text)
     except Exception as e:
         print("DSL parse error in detailed_dsl:", e)
-        # fallback на базово търсене по термина
         return {
             "query": {
                 "match": {
@@ -219,22 +232,19 @@ def summarize_results(question, chunks):
 
 
 def generate_term_with_retries(question):
-    list_collection = []
     for attempt in range(MAX_RETRIES):
         term, collection = extract_term_and_collection(question)
         if not isinstance(collection, list):
-            list_collection.append(collection)
-            collection = list_collection
+            collection = [collection]
         if not term or not collection:
             continue
-        matched_indices = find_matching_indices(term, [collection])
+        matched_indices = find_matching_indices(term, collection)
         if matched_indices:
             return term, matched_indices, []
     return None, [], []
 
 
 def handle_question(question):
-    """Process a legal question and return summarized legal info."""
     term, matched_indices, failed_terms = generate_term_with_retries(question)
 
     if not term:
@@ -242,18 +252,15 @@ def handle_question(question):
     if not matched_indices:
         return {"error": "Няма индекси с резултати за този термин."}
 
-    # Normalize indices
     if not isinstance(matched_indices[0], str):
         matched_indices = matched_indices[0]
-    matched_indices = [i for i in matched_indices if i]  # remove empty names
+    matched_indices = [i for i in matched_indices if i]
     indices_str = ",".join(matched_indices)
 
     print(f"🔍 Searching for term '{term}' in indices: {indices_str}")
 
-    # Generate DSL via Gemini
     detailed_dsl = generate_detailed_dsl(question, term, matched_indices)
 
-    # Search ES safely
     try:
         res = es.search(index=indices_str, body=detailed_dsl)
     except Exception as e:
@@ -287,6 +294,7 @@ def handle_question(question):
         "matches": all_hits
     }
 
+
 # 🧩 FastAPI Routes
 class Question(BaseModel):
     question: str
@@ -296,12 +304,13 @@ class Question(BaseModel):
 def home():
     return {"message": "JusticIA API is running. POST your question to /generate"}
 
+
 @app.post("/index")
 def index_all_data():
-    """Populate Elasticsearch from MongoDB collections."""
     index_mongo_to_es()
     return {"message": "Data indexed successfully."}
+
+
 @app.post("/generate")
 def generate(payload: Question):
-    """Generate a summarized legal answer."""
     return handle_question(payload.question)
