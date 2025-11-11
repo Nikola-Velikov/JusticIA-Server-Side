@@ -374,7 +374,7 @@ def clean_document(doc):
     """Recursively sanitize MongoDB document keys for Elasticsearch."""
     clean_doc = {}
     for k, v in doc.items():
-        clean_key = re.sub(r'[.$]', '_', k)  # ES forbids '.' and '$' in field names
+        clean_key = re.sub(r'[.$]', '_', k)
         if isinstance(v, dict):
             clean_doc[clean_key] = clean_document(v)
         elif isinstance(v, list):
@@ -416,7 +416,6 @@ def index_mongo_to_es():
                     "_source": doc
                 })
 
-                # Bulk every 500 docs for performance
                 if len(actions) >= 500:
                     helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
                     total_indexed += len(actions)
@@ -455,67 +454,66 @@ def ask_gemini(prompt):
 
 def extract_term_and_collection(question):
     prompt = f"""
-    Ти си интелигентен български правен асистент. Твоята задача е да определиш:
-    1️⃣ основния правен термин от въпроса (само съществително или правно понятие, не глагол),
-    2️⃣ колекциите от базата, където най-вероятно се съдържа информация за този термин.
+Ти си интелигентен български правен асистент. Твоята задача е да определиш:
+1️⃣ основния правен термин от въпроса (само съществително или правно понятие, не глагол),
+2️⃣ колекциите от базата, където най-вероятно се съдържа информация за този термин.
 
-    Насоки:
-    - Игнорирай глаголи като "обжалване", "подаване", "имам право", "получавам", "правя".
-    - Ако въпросът съдържа и действие, и обект (напр. „Как се обжалва наказателно постановление?“), терминът е само обектът → „наказателно постановление“.
-    - Ако няма ясен обект, избери най-близкото правно понятие (напр. „договор“, „имущество“, „наследство“).
-    - Ако въпросът не е правен — върни празен JSON.
+Насоки:
+- Игнорирай глаголи като "обжалване", "подаване", "имам право", "получавам", "правя".
+- Ако въпросът съдържа и действие, и обект (напр. „Как се обжалва наказателно постановление?“), терминът е само обектът → „наказателно постановление“.
+- Ако няма ясен обект, избери най-близкото правно понятие.
+- Ако въпросът не е правен — върни празен JSON.
 
-    Колекции и тяхното значение:
-    - "constitution" → Конституция на Република България
-    - "codex" → Кодекси (Наказателен, Граждански, Трудов, Семейен и др.)
-    - "laws" → Закони
-    - "implementableRegulations" → Правилници за прилагане
-    - "regulations" → Правилници
-    - "rules" → Наредби
+Колекции:
+- "constitution" → Конституция
+- "codex" → Кодекси
+- "laws" → Закони
+- "implementableRegulations" → Правилници за прилагане
+- "regulations" → Правилници
+- "rules" → Наредби
 
-    Формат на отговора (задължително само JSON, без текст преди или след):
-    {{
-      "term": "<ключов правен термин>",
-      "collection": ["<една или повече от: constitution, codex, laws, implementableRegulations, regulations, rules>"]
-    }}
+Формат:
+{{
+  "term": "<ключов правен термин>",
+  "collection": ["<една или повече от: constitution, codex, laws, implementableRegulations, regulations, rules>"]
+}}
 
-    Въпрос: "{question}"
-    """
-
+Въпрос: "{question}"
+"""
     output = ask_gemini(prompt)
-
     try:
         json_start = output.find("{")
-        json_end = output.find("}", json_start) + 1
-        json_str = output[json_start:json_end]
-        parsed = json.loads(json_str)
-        return parsed.get("term", "").lower(), parsed.get("collection", "")
+        json_end = output.rfind("}") + 1
+        parsed = json.loads(output[json_start:json_end])
+        term = parsed.get("term", "").lower()
+        collection = parsed.get("collection", [])
+        if isinstance(collection, str):
+            collection = [collection]
+        return term, collection
     except Exception as e:
         print("Failed to parse Gemini term response:", e)
-        return None, None
+        return None, []
 
 
 def find_matching_indices(term, indices):
-    """Find indices in Elasticsearch that contain the search term."""
-    matched = []
+    """Safely find valid existing indices for the term."""
+    valid_indices = []
+    all_es_indices = es.indices.get_alias("*").keys()
+
     for idx in indices:
-        if not idx:
-            continue
-        try:
-            res = es.search(index=idx, body={
-                "query": {
-                    "multi_match": {
-                        "query": term,
-                        "fields": ["description"]
-                    }
-                },
-                "size": 1
-            })
-            if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
-                matched.append(idx)
-        except Exception as e:
-            print(f"⚠️ Error searching in index '{idx}': {e}")
-    return matched
+        if idx in all_es_indices:
+            try:
+                res = es.search(index=idx, body={
+                    "query": {"multi_match": {"query": term, "fields": ["description"]}},
+                    "size": 1
+                })
+                if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
+                    valid_indices.append(idx)
+            except Exception as e:
+                print(f"⚠️ Error searching in index '{idx}': {e}")
+        else:
+            print(f"⚠️ Skipping missing index '{idx}' — not found in Elasticsearch.")
+    return valid_indices
 
 
 def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
@@ -525,29 +523,17 @@ def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
     prompt = f"""
 Изходен въпрос: \"{question}\"
 Текущ термин: \"{term}\".{excluded}
-Генерирай детайлна Elasticsearch DSL заявка с 'highlight', търсеща в поле 'description'. Върни само JSON. НЕ включвай 'indices' в JSON заявката.
+Генерирай Elasticsearch DSL заявка с highlight за поле 'description'. Върни само JSON.
 """
     output = ask_gemini(prompt)
-
     try:
         json_start = output.find("{")
         json_end = output.rfind("}") + 1
-        json_text = output[json_start:json_end]
-        return json.loads(json_text)
-    except Exception as e:
-        print("DSL parse error in detailed_dsl:", e)
-        # fallback на базово търсене по термина
+        return json.loads(output[json_start:json_end])
+    except Exception:
         return {
-            "query": {
-                "match": {
-                    "description": term
-                }
-            },
-            "highlight": {
-                "fields": {
-                    "description": {}
-                }
-            }
+            "query": {"match": {"description": term}},
+            "highlight": {"fields": {"description": {}}}
         }
 
 
@@ -564,61 +550,45 @@ def summarize_results(question, chunks):
 Намерени са следните членове:
 {full_text}
 
-Обобщи ги на български, като говориш в трето лицe. Формата трябва да е markdown и не се обръщай към потребителя. Ако въпросът който е попитал потребителя няма нищо общо с правото му кажи, че не можеш да отговориш на този въпрос.
+Обобщи ги на български, като говориш в трето лицe. Форматът е markdown.
 """
     output = ask_gemini(prompt)
-    return output.strip()
+    return output.strip() if output else "Неуспешно обобщение."
 
 
 def generate_term_with_retries(question):
-    list_collection = []
-    for attempt in range(MAX_RETRIES):
-        term, collection = extract_term_and_collection(question)
-        if not isinstance(collection, list):
-            list_collection.append(collection)
-            collection = list_collection
-        if not term or not collection:
+    for _ in range(MAX_RETRIES):
+        term, collections = extract_term_and_collection(question)
+        if not term or not collections:
             continue
-        matched_indices = find_matching_indices(term, [collection])
+        matched_indices = find_matching_indices(term, collections)
         if matched_indices:
             return term, matched_indices, []
     return None, [], []
 
 
 def handle_question(question):
-    """Process a legal question and return summarized legal info."""
-    term, matched_indices, failed_terms = generate_term_with_retries(question)
+    term, matched_indices, _ = generate_term_with_retries(question)
 
     if not term:
         return {"error": "Не може да се намери термин с резултати."}
     if not matched_indices:
-        return {"error": "Няма индекси с резултати за този термин."}
+        return {"error": "Няма намерени индекси с резултати."}
 
-    # Normalize indices
-    if not isinstance(matched_indices[0], str):
-        matched_indices = matched_indices[0]
-    matched_indices = [i for i in matched_indices if i]  # remove empty names
-    indices_str = ",".join(matched_indices)
+    print(f"🔍 Searching for term '{term}' in indices: {matched_indices}")
 
-    print(f"🔍 Searching for term '{term}' in indices: {indices_str}")
-
-    # Generate DSL via Gemini
     detailed_dsl = generate_detailed_dsl(question, term, matched_indices)
 
-    # Search ES safely
     try:
-        res = es.search(index=indices_str, body=detailed_dsl)
+        res = es.search(index=matched_indices, body=detailed_dsl)
     except Exception as e:
-        print(f"💥 Elasticsearch search error: {e}")
         return {"error": f"Неуспешно търсене в Elasticsearch: {str(e)}"}
 
     hits = res.get("hits", {}).get("hits", [])
     if not hits:
         return {"message": f"Няма намерени резултати за '{term}'."}
 
-    all_hits = []
-    sources = []
-
+    all_hits, sources = [], []
     for hit in hits:
         desc = hit["_source"].get("description", "")
         chlen_matches = extract_article_context(desc, term)
@@ -628,8 +598,7 @@ def handle_question(question):
             "title": hit["_source"].get("title", "Без заглавие")
         })
 
-    summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
-
+    summary = summarize_results(question, all_hits)
     return {
         "term": term,
         "indices": matched_indices,
@@ -638,6 +607,7 @@ def handle_question(question):
         "sources": sources,
         "matches": all_hits
     }
+
 
 # 🧩 FastAPI Routes
 class Question(BaseModel):
@@ -648,12 +618,13 @@ class Question(BaseModel):
 def home():
     return {"message": "JusticIA API is running. POST your question to /generate"}
 
+
 @app.post("/index")
 def index_all_data():
-    """Populate Elasticsearch from MongoDB collections."""
     index_mongo_to_es()
     return {"message": "Data indexed successfully."}
+
+
 @app.post("/generate")
 def generate(payload: Question):
-    """Generate a summarized legal answer."""
     return handle_question(payload.question)
