@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 # 🧠 Configure Gemini
-genai.configure(api_key="AIzaSyAsO2plQSBkJrv0EAYv7LMCbd3XZYnaeng")
+genai.configure(api_key="AIzaSyDFIm6r7BW-SFdngtGUd_76zUV2cVKXOl4")
 gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 # ⚙️ Database configuration
