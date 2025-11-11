@@ -283,11 +283,14 @@ def handle_question(question):
 
     all_hits = []
     sources = []
+    full_law_found = False
+    full_law_text = ""
 
     for hit in hits:
         source = hit["_source"]
         title = source.get("title", "").lower()
-        desc = hit["_source"].get("description", "")
+        desc = source.get("description", "")
+
         if term.lower() in title:
             print(f"📘 Full match in title: {title}")
             full_law_found = True
@@ -296,17 +299,29 @@ def handle_question(question):
                 "index": hit["_index"],
                 "title": hit.get("title", "Без заглавие")
             })
-            break  # stop after first full match
+            break
 
         chlen_matches = extract_article_context(desc, term)
         all_hits.extend(chlen_matches)
         sources.append({
             "index": hit["_index"],
-            "title": hit["_source"].get("title", "Без заглавие")
+            "title": hit.get("title", "Без заглавие")
         })
 
-    summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
+    # ✅ Handle case: full law found
+    if full_law_found:
+        summary = summarize_results(question, [full_law_text])
+        return {
+            "term": term,
+            "indices": matched_indices,
+            "results_count": 1,
+            "summary": summary,
+            "sources": sources,
+            "matches": [full_law_text]
+        }
 
+    # ✅ Default case: no full law match, normal article extraction
+    summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
     return {
         "term": term,
         "indices": matched_indices,
