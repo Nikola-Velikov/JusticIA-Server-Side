@@ -193,32 +193,63 @@ def find_matching_indices(term, indices):
 def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
     if not isinstance(indices[0], str):
         indices = indices[0]
+
     excluded = f" Предишни термини без резултат: {', '.join(excluded_terms)}." if excluded_terms else ""
     prompt = f"""
 Изходен въпрос: \"{question}\"
 Текущ термин: \"{term}\".{excluded}
-Генерирай детайлна Elasticsearch DSL заявка с 'highlight', търсеща в поле 'description'. Върни само JSON. НЕ включвай 'indices' в JSON заявката.
+Генерирай детайлна Elasticsearch DSL заявка (JSON) с 'highlight', която търси в полетата 'title' и 'description'.
+Използвай 'multi_match' с boost за title (title^3). Върни само JSON, без обяснения или 'indices' в заявката.
 """
+
     output = ask_gemini(prompt)
 
     try:
         json_start = output.find("{")
         json_end = output.rfind("}") + 1
         json_text = output[json_start:json_end]
-        return json.loads(json_text)
+        dsl = json.loads(json_text)
+
+        # ✅ Ensure that if Gemini forgot to include title, we add it
+        if "query" not in dsl or "multi_match" not in dsl["query"]:
+            raise ValueError("Gemini DSL incomplete, using fallback.")
+
+        fields = dsl["query"]["multi_match"].get("fields", [])
+        if not any("title" in f for f in fields):
+            fields.append("title^3")
+            fields.append("description")
+            dsl["query"]["multi_match"]["fields"] = list(set(fields))
+
+        # ✅ Ensure highlight exists for both fields
+        if "highlight" not in dsl:
+            dsl["highlight"] = {"fields": {"title": {}, "description": {}}}
+        else:
+            dsl["highlight"]["fields"]["title"] = {}
+            dsl["highlight"]["fields"]["description"] = {}
+
+        # ✅ Limit size so you get multiple hits
+        if "size" not in dsl:
+            dsl["size"] = 100
+
+        return dsl
+
     except Exception as e:
         print("DSL parse error in detailed_dsl:", e)
+        # 🔒 Safe fallback — always search both title and description
         return {
             "query": {
-                "match": {
-                    "description": term
+                "multi_match": {
+                    "query": term,
+                    "fields": ["title^3", "description"]
                 }
             },
             "highlight": {
                 "fields": {
+                    "title": {},
                     "description": {}
                 }
-            }
+            },
+            "size": 100
         }
 
 
