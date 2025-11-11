@@ -52,6 +52,16 @@ def clean_document(doc):
 def index_mongo_to_es():
     """Indexes all MongoDB collections into Elasticsearch safely and completely."""
     for coll_name in MONGO_COLLECTIONS:
+        index_name = coll_name.lower()
+
+    # 🧹 Delete old index if it exists (clean rebuild, prevents duplicates)
+        try:
+            if es.indices.exists(index=index_name):
+             es.indices.delete(index=index_name)
+             print(f"🧹 Deleted old index '{index_name}' before reindexing.")
+        except Exception as e:
+            print(f"⚠️ Could not check/delete index '{index_name}': {e}")
+    for coll_name in MONGO_COLLECTIONS:
         collection = mongo_db[coll_name]
         docs = collection.find()
         actions = []
