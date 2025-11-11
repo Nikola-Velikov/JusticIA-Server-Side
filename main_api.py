@@ -165,7 +165,7 @@ def extract_term_and_collection(question):
                 collection = [collection]
         elif not isinstance(collection, list):
             collection = [collection]
-
+        collection = [c.lower() for c in collection]
         return term, collection
     except Exception as e:
         print("Failed to parse Gemini term response:", e)
