@@ -262,7 +262,6 @@ def handle_question(question):
     if not matched_indices:
         return {"error": "Няма индекси с резултати за този термин."}
 
-    # Normalize indices list
     if not isinstance(matched_indices[0], str):
         matched_indices = matched_indices[0]
     matched_indices = [i for i in matched_indices if i]
@@ -282,56 +281,39 @@ def handle_question(question):
     if not hits:
         return {"message": f"Няма намерени резултати за '{term}'."}
 
-    all_hits = []             # all extracted articles
-    full_law_texts = []       # full descriptions for title matches
-    sources = []              # all matched docs metadata
+    all_hits = []
+    sources = []
 
     for hit in hits:
         source = hit["_source"]
         title = source.get("title", "").lower()
-        desc = source.get("description", "")
-
-        # ✅ If the law title itself matches the term (e.g. "валутен закон")
+        desc = hit["_source"].get("description", "")
         if term.lower() in title:
             print(f"📘 Full match in title: {title}")
-            full_law_texts.append(desc)
+            full_law_found = True
+            full_law_text = desc
             sources.append({
                 "index": hit["_index"],
                 "title": hit.get("title", "Без заглавие")
             })
-            continue  # don't skip other hits, keep checking
 
-        # ✅ Otherwise, try to match specific articles (Чл.)
+
         chlen_matches = extract_article_context(desc, term)
-        if chlen_matches:
-            all_hits.extend(chlen_matches)
-            sources.append({
-                "index": hit["_index"],
-                "title": hit.get("title", "Без заглавие")
-            })
+        all_hits.extend(chlen_matches)
+        sources.append({
+            "index": hit["_index"],
+            "title": hit["_source"].get("title", "Без заглавие")
+        })
 
-    # ✅ Combine everything: full laws first, then article matches
-    combined_texts = full_law_texts + all_hits
+    summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
 
-    if combined_texts:
-        summary = summarize_results(question, combined_texts)
-        return {
-            "term": term,
-            "indices": matched_indices,
-            "results_count": len(combined_texts),
-            "summary": summary,
-            "sources": sources,
-            "matches": combined_texts
-        }
-
-    # ❌ Nothing found at all
     return {
         "term": term,
         "indices": matched_indices,
-        "results_count": 0,
-        "summary": "Няма релевантни членове или закони.",
+        "results_count": len(all_hits),
+        "summary": summary,
         "sources": sources,
-        "matches": []
+        "matches": all_hits
     }
 
 
