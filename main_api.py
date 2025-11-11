@@ -290,12 +290,12 @@ def handle_question(question):
         desc = hit["_source"].get("description", "")
         if term.lower() in title:
             print(f"📘 Full match in title: {title}")
-            full_law_found = True
-            full_law_text = desc
+            all_hits.append(desc)  # ✅ add the entire law text
             sources.append({
                 "index": hit["_index"],
-                "title": hit.get("title", "Без заглавие")
+                "title": source.get("title", "Без заглавие")
             })
+            continue
 
 
         chlen_matches = extract_article_context(desc, term)
