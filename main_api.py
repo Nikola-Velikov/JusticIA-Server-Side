@@ -178,7 +178,7 @@ def find_matching_indices(term, indices):
                 "query": {
                     "multi_match": {
                         "query": term,
-                        "fields": ["description"]
+                        "fields": ["title^3", "description"]
                     }
                 },
                 "size": 1
