@@ -8,9 +8,13 @@ import google.generativeai as genai
 from bson import ObjectId
 from fastapi import FastAPI
 from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # 🧠 Configure Gemini
-genai.configure(api_key="AIzaSyBcfBmg9ntMWTtjuVcdxufZ4Ilpd8iDB6E")
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 # ⚙️ Database configuration
