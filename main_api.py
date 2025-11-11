@@ -496,24 +496,35 @@ def extract_term_and_collection(question):
 
 
 def find_matching_indices(term, indices):
-    """Safely find valid existing indices for the term."""
-    valid_indices = []
-    all_es_indices = es.indices.get_alias("*").keys()
+    """Find indices in Elasticsearch that contain the search term."""
+    matched = []
+    try:
+        all_es_indices = es.indices.get_alias(name="*").keys()
+    except Exception as e:
+        print(f"⚠️ Could not retrieve ES indices: {e}")
+        all_es_indices = []
 
     for idx in indices:
-        if idx in all_es_indices:
-            try:
-                res = es.search(index=idx, body={
-                    "query": {"multi_match": {"query": term, "fields": ["description"]}},
-                    "size": 1
-                })
-                if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
-                    valid_indices.append(idx)
-            except Exception as e:
-                print(f"⚠️ Error searching in index '{idx}': {e}")
-        else:
+        if not idx:
+            continue
+        if idx not in all_es_indices:
             print(f"⚠️ Skipping missing index '{idx}' — not found in Elasticsearch.")
-    return valid_indices
+            continue
+        try:
+            res = es.search(index=idx, body={
+                "query": {
+                    "multi_match": {
+                        "query": term,
+                        "fields": ["description"]
+                    }
+                },
+                "size": 1
+            })
+            if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
+                matched.append(idx)
+        except Exception as e:
+            print(f"⚠️ Error searching in index '{idx}': {e}")
+    return matched
 
 
 def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
