@@ -89,7 +89,7 @@ def index_mongo_to_es():
                     "_source": doc
                 })
 
-                if len(actions) >= 500:
+                if len(actions) >= 100:
                     helpers.bulk(es, actions, raise_on_error=False, request_timeout=120)
                     total_indexed += len(actions)
                     actions = []
