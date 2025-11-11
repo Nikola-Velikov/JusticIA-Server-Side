@@ -3,3 +3,4 @@ uvicorn
 pymongo
 google-generativeai
 elasticsearch==8.14.0
+elastic-transport==8.14.0
