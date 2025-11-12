@@ -115,32 +115,33 @@ def index_mongo_to_es():
 # 🧠 NEW: ask_llama (replaces ask_gemini)
 def ask_llama(prompt):
     """
-    Sends the same full prompt to LLaMA 3.3.
-    If it's too long, splits into multiple sequential chunks (no summarization or merging).
+    Keeps conversation context by including previous chunks in every new request.
+    Prevents loss of meaning for long legal prompts.
     """
-    max_chunk_length = 6000  # characters per chunk (~1500 tokens)
+    max_chunk_length = 6000
     chunks = [prompt[i:i + max_chunk_length] for i in range(0, len(prompt), max_chunk_length)]
-
-    full_output = ""
+    messages = []
+    output = ""
 
     for i, chunk in enumerate(chunks):
+        messages.append({"role": "user", "content": chunk})
         try:
-            print(f"⚙️ Sending chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+            print(f"⚙️ Sending chunk {i+1}/{len(chunks)} with cumulative context")
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "user", "content": chunk}
-                ],
+                messages=messages,  # includes all previous chunks
                 temperature=0.3,
                 max_completion_tokens=1024
             )
-            part_output = response.choices[0].message.content.strip()
-            full_output += part_output + "\n"
+            reply = response.choices[0].message.content.strip()
+            output += reply + "\n"
+            # Optionally add model's reply as assistant context for next iteration
+            messages.append({"role": "assistant", "content": reply})
         except Exception as e:
             print(f"⚠️ Chunk {i+1} failed: {e}")
             continue
 
-    return full_output.strip() if full_output else None
+    return output.strip()
 
 
 # --- All logic below now calls ask_llama() instead of ask_gemini() ---
