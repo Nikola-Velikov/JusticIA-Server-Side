@@ -4,18 +4,15 @@ from elasticsearch.helpers import BulkIndexError
 import json
 import re
 import ast
-import google.generativeai as genai
 from bson import ObjectId
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
+from groq import Groq   # ✅ NEW: import Groq client
 
 load_dotenv()
-
-# 🧠 Configure Gemini
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))  # ✅ NEW: configure Groq client
 
 # ⚙️ Database configuration
 MONGO_URI = "mongodb://mongo:kpBxiANKRFwHbakPiIIiVUgbzCFFsvyr@tramway.proxy.rlwy.net:30965"
@@ -35,12 +32,11 @@ es = Elasticsearch(
 )
 
 # ⚖️ FastAPI setup
-app = FastAPI(title="JusticIA API", description="Legal AI Assistant API", version="1.0.0")
+app = FastAPI(title="JusticIA API", description="Legal AI Assistant API (Groq LLaMA 3.3)", version="1.0.0")
 
 
 # ✅ CLEAN + INDEX FUNCTION
 def clean_document(doc):
-    """Recursively sanitize MongoDB document keys for Elasticsearch."""
     clean_doc = {}
     for k, v in doc.items():
         clean_key = re.sub(r'[.$]', '_', k)
@@ -54,17 +50,15 @@ def clean_document(doc):
 
 
 def index_mongo_to_es():
-    """Indexes all MongoDB collections into Elasticsearch safely and completely."""
     for coll_name in MONGO_COLLECTIONS:
         index_name = coll_name.lower()
-
-    # 🧹 Delete old index if it exists (clean rebuild, prevents duplicates)
         try:
             if es.indices.exists(index=index_name):
-             es.indices.delete(index=index_name)
-             print(f"🧹 Deleted old index '{index_name}' before reindexing.")
+                es.indices.delete(index=index_name)
+                print(f"🧹 Deleted old index '{index_name}' before reindexing.")
         except Exception as e:
             print(f"⚠️ Could not check/delete index '{index_name}': {e}")
+
     for coll_name in MONGO_COLLECTIONS:
         collection = mongo_db[coll_name]
         docs = collection.find()
@@ -86,7 +80,6 @@ def index_mongo_to_es():
                         doc[key] = value.isoformat()
 
                 doc = clean_document(doc)
-
                 actions.append({
                     "_index": coll_name.lower(),
                     "_id": doc_id,
@@ -119,41 +112,44 @@ def index_mongo_to_es():
     print("🎯 All MongoDB collections successfully indexed into Elasticsearch!")
 
 
-def ask_gemini(prompt):
+# 🧠 NEW: ask_llama (replaces ask_gemini)
+def ask_llama(prompt):
     try:
-        response = gemini_model.generate_content(prompt)
-        return response.text
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_completion_tokens=1024
+        )
+        return completion.choices[0].message.content.strip()
     except Exception as e:
-        print("Не може да се отговори на въпроса ви:", e)
+        print("⚠️ LLaMA request failed:", e)
         return None
 
 
+# --- All logic below now calls ask_llama() instead of ask_gemini() ---
+
 def extract_term_and_collection(question):
     prompt = f"""
-Ти си български правен асистент. Ако въпросът който е попитал потребителя няма нищо общо с правото му кажи, че не можеш да отговориш на този въпрос, ако е свързан тогава извлечи основния правен термин или го генерирай на базата на въпроса, като трябва да е само съществително/и име/на и предполагаемата колекция от следния въпрос:
+Ти си български правен асистент. Ако въпросът няма нищо общо с правото, отговори, че не можеш да отговориш.
+Ако е свързан с правото, извлечи основния правен термин и най-подходящата колекция:
 
-\"{question}\"
+Въпрос: "{question}"
 
-Върни отговор във формат:
+Върни само JSON във формат:
 {{
   "term": "ключов правен термин",
   "collection": ["constitution", "codex", "laws", "implementableRegulations", "regulations", "rules"]
 }}
-
-Без обяснения, върни само JSON.
 """
-    output = ask_gemini(prompt)
-
+    output = ask_llama(prompt)
     try:
         json_start = output.find("{")
         json_end = output.find("}", json_start) + 1
         json_str = output[json_start:json_end]
         parsed = json.loads(json_str)
-
         term = parsed.get("term", "").lower()
         collection = parsed.get("collection", [])
-
-        # ✅ FIX: always make collection a list
         if isinstance(collection, str):
             try:
                 evaluated = ast.literal_eval(collection)
@@ -168,7 +164,7 @@ def extract_term_and_collection(question):
         collection = [c.lower() for c in collection]
         return term, collection
     except Exception as e:
-        print("Failed to parse Gemini term response:", e)
+        print("⚠️ Failed to parse LLaMA term response:", e)
         return None, []
 
 
@@ -179,12 +175,7 @@ def find_matching_indices(term, indices):
             continue
         try:
             res = es.search(index=idx, body={
-                "query": {
-                    "multi_match": {
-                        "query": term,
-                        "fields": ["title^3", "description"]
-                    }
-                },
+                "query": {"multi_match": {"query": term, "fields": ["title^3", "description"]}},
                 "size": 1
             })
             if res.get("hits", {}).get("total", {}).get("value", 0) > 0:
@@ -197,62 +188,28 @@ def find_matching_indices(term, indices):
 def generate_detailed_dsl(question, term, indices, excluded_terms=[]):
     if not isinstance(indices[0], str):
         indices = indices[0]
-
     excluded = f" Предишни термини без резултат: {', '.join(excluded_terms)}." if excluded_terms else ""
     prompt = f"""
-Изходен въпрос: \"{question}\"
-Текущ термин: \"{term}\".{excluded}
-Генерирай детайлна Elasticsearch DSL заявка (JSON) с 'highlight', която търси в полетата 'title' и 'description'.
-Използвай 'multi_match' с boost за title (title^3). Върни само JSON, без обяснения или 'indices' в заявката.
+Изходен въпрос: "{question}"
+Текущ термин: "{term}"{excluded}
+Генерирай Elasticsearch DSL заявка (JSON) с 'highlight' и 'multi_match' (title^3, description).
 """
-
-    output = ask_gemini(prompt)
-
+    output = ask_llama(prompt)
     try:
         json_start = output.find("{")
         json_end = output.rfind("}") + 1
         json_text = output[json_start:json_end]
         dsl = json.loads(json_text)
-
-        # ✅ Ensure that if Gemini forgot to include title, we add it
         if "query" not in dsl or "multi_match" not in dsl["query"]:
-            raise ValueError("Gemini DSL incomplete, using fallback.")
-
-        fields = dsl["query"]["multi_match"].get("fields", [])
-        if not any("title" in f for f in fields):
-            fields.append("title^3")
-            fields.append("description")
-            dsl["query"]["multi_match"]["fields"] = list(set(fields))
-
-        # ✅ Ensure highlight exists for both fields
+            raise ValueError("Incomplete DSL")
         if "highlight" not in dsl:
             dsl["highlight"] = {"fields": {"title": {}, "description": {}}}
-        else:
-            dsl["highlight"]["fields"]["title"] = {}
-            dsl["highlight"]["fields"]["description"] = {}
-
-        # ✅ Limit size so you get multiple hits
-        if "size" not in dsl:
-            dsl["size"] = 100
-
+        dsl["size"] = dsl.get("size", 100)
         return dsl
-
-    except Exception as e:
-        print("DSL parse error in detailed_dsl:", e)
-        # 🔒 Safe fallback — always search both title and description
+    except Exception:
         return {
-            "query": {
-                "multi_match": {
-                    "query": term,
-                    "fields": ["title^3", "description"]
-                }
-            },
-            "highlight": {
-                "fields": {
-                    "title": {},
-                    "description": {}
-                }
-            },
+            "query": {"multi_match": {"query": term, "fields": ["title^3", "description"]}},
+            "highlight": {"fields": {"title": {}, "description": {}}},
             "size": 100
         }
 
@@ -266,14 +223,14 @@ def extract_article_context(description, term):
 def summarize_results(question, chunks):
     full_text = "\n\n".join(chunks)
     prompt = f"""
-Потребителят пита: \"{question}\"
-Намерени са следните членове:
+Потребителят пита: "{question}"
+Намерени членове:
 {full_text}
 
-Обобщи ги на български, като говориш в трето лицe. Формата трябва да е markdown и не се обръщай към потребителя. Ако въпросът който е попитал потребителя няма нищо общо с правото му кажи, че не можеш да отговориш на този въпрос. 
+Обобщи на български в markdown, в трето лице.
 """
-    output = ask_gemini(prompt)
-    return output.strip()
+    output = ask_llama(prompt)
+    return output.strip() if output else "Няма отговор."
 
 
 def generate_term_with_retries(question):
@@ -291,25 +248,20 @@ def generate_term_with_retries(question):
 
 def handle_question(question):
     term, matched_indices, failed_terms = generate_term_with_retries(question)
-
     if not term:
         return {"error": "Не може да се намери термин с резултати."}
     if not matched_indices:
         return {"error": "Няма индекси с резултати за този термин."}
-
     if not isinstance(matched_indices[0], str):
         matched_indices = matched_indices[0]
     matched_indices = [i for i in matched_indices if i]
     indices_str = ",".join(matched_indices)
-
     print(f"🔍 Searching for term '{term}' in indices: {indices_str}")
 
     detailed_dsl = generate_detailed_dsl(question, term, matched_indices)
-
     try:
         res = es.search(index=indices_str, body=detailed_dsl)
     except Exception as e:
-        print(f"💥 Elasticsearch search error: {e}")
         return {"error": f"Неуспешно търсене в Elasticsearch: {str(e)}"}
 
     hits = res.get("hits", {}).get("hits", [])
@@ -318,38 +270,20 @@ def handle_question(question):
 
     all_hits = []
     sources = []
-
     for hit in hits:
         source = hit["_source"]
         title = source.get("title", "").lower()
         desc = hit["_source"].get("description", "")
         if term.lower() in title:
-            print(f"📘 Full match in title: {title}")
-            all_hits.append(desc)  # ✅ add the entire law text
-            sources.append({
-                "index": hit["_index"],
-                "title": source.get("title", "Без заглавие")
-            })
+            all_hits.append(desc)
+            sources.append({"index": hit["_index"], "title": source.get("title", "Без заглавие")})
             continue
-
-
         chlen_matches = extract_article_context(desc, term)
         all_hits.extend(chlen_matches)
-        sources.append({
-            "index": hit["_index"],
-            "title": hit["_source"].get("title", "Без заглавие")
-        })
-
+        sources.append({"index": hit["_index"], "title": hit["_source"].get("title", "Без заглавие")})
     summary = summarize_results(question, all_hits) if all_hits else "Няма релевантни членове."
-
-    return {
-        "term": term,
-        "indices": matched_indices,
-        "results_count": len(all_hits),
-        "summary": summary,
-        "sources": sources,
-        "matches": all_hits
-    }
+    return {"term": term, "indices": matched_indices, "results_count": len(all_hits),
+            "summary": summary, "sources": sources, "matches": all_hits}
 
 
 # 🧩 FastAPI Routes
@@ -359,7 +293,7 @@ class Question(BaseModel):
 
 @app.get("/")
 def home():
-    return {"message": "JusticIA API is running. POST your question to /generate"}
+    return {"message": "JusticIA API (Groq LLaMA 3.3) is running. POST your question to /generate"}
 
 
 @app.post("/index")
