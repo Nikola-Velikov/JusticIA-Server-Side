@@ -10,6 +10,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 from groq import Groq   # ✅ NEW: import Groq client
+import google.generativeai as genai
+
+# 🧩 Configure Gemini only for summaries
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))  # ✅ NEW: configure Groq client
@@ -112,36 +117,31 @@ def index_mongo_to_es():
     print("🎯 All MongoDB collections successfully indexed into Elasticsearch!")
 
 
-# 🧠 NEW: ask_llama (replaces ask_gemini)
+def ask_gemini(prompt):
+
+    try:
+
+        response = gemini_model.generate_content(prompt)
+
+        return response.text
+
+    except Exception as e:
+
+        print("Не може да се отговори на въпроса ви:", e)
+
+        return None
 def ask_llama(prompt):
-    """
-    Keeps conversation context by including previous chunks in every new request.
-    Prevents loss of meaning for long legal prompts.
-    """
-    max_chunk_length = 6000
-    chunks = [prompt[i:i + max_chunk_length] for i in range(0, len(prompt), max_chunk_length)]
-    messages = []
-    output = ""
-
-    for i, chunk in enumerate(chunks):
-        messages.append({"role": "user", "content": chunk})
-        try:
-            print(f"⚙️ Sending chunk {i+1}/{len(chunks)} with cumulative context")
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,  # includes all previous chunks
-                temperature=0.3,
-                max_completion_tokens=1024
-            )
-            reply = response.choices[0].message.content.strip()
-            output += reply + "\n"
-            # Optionally add model's reply as assistant context for next iteration
-            messages.append({"role": "assistant", "content": reply})
-        except Exception as e:
-            print(f"⚠️ Chunk {i+1} failed: {e}")
-            continue
-
-    return output.strip()
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_completion_tokens=1024
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        print("⚠️ LLaMA request failed:", e)
+        return None
 
 
 # --- All logic below now calls ask_llama() instead of ask_gemini() ---
@@ -246,7 +246,7 @@ def summarize_results(question, chunks):
 
 Обобщи на български в markdown, в трето лице.
 """
-    output = ask_llama(prompt)
+    output = ask_gemini(prompt)
     return output.strip() if output else "Няма отговор."
 
 
