@@ -114,17 +114,33 @@ def index_mongo_to_es():
 
 # 🧠 NEW: ask_llama (replaces ask_gemini)
 def ask_llama(prompt):
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_completion_tokens=1024
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        print("⚠️ LLaMA request failed:", e)
-        return None
+    """
+    Sends the same full prompt to LLaMA 3.3.
+    If it's too long, splits into multiple sequential chunks (no summarization or merging).
+    """
+    max_chunk_length = 6000  # characters per chunk (~1500 tokens)
+    chunks = [prompt[i:i + max_chunk_length] for i in range(0, len(prompt), max_chunk_length)]
+
+    full_output = ""
+
+    for i, chunk in enumerate(chunks):
+        try:
+            print(f"⚙️ Sending chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "user", "content": chunk}
+                ],
+                temperature=0.3,
+                max_completion_tokens=1024
+            )
+            part_output = response.choices[0].message.content.strip()
+            full_output += part_output + "\n"
+        except Exception as e:
+            print(f"⚠️ Chunk {i+1} failed: {e}")
+            continue
+
+    return full_output.strip() if full_output else None
 
 
 # --- All logic below now calls ask_llama() instead of ask_gemini() ---
