@@ -258,7 +258,7 @@ def summarize_results(question, chunks):
 
 Цел: Крайният резултат трябва да изглежда като професионално изготвено кратко резюме на правен текст.
 """
-"""
+
     output = ask_gemini(prompt)
     return output.strip() if output else "Няма отговор."
 
