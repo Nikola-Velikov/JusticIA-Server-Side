@@ -524,7 +524,11 @@ def generate_term_with_retries(question: str, allowed_cols: list[str], lang: str
 
 
 def summarize_results(question: str, chunks: list[str], lang: str):
+    MAX_SUMMARY_CHARS = 120_000
+
     full_text = "\n\n".join(chunks)
+    if len(full_text) > MAX_SUMMARY_CHARS:
+        full_text = full_text[:MAX_SUMMARY_CHARS]
 
     if lang == "en":
         prompt = f"""
@@ -565,6 +569,9 @@ Requirements:
 """
 
     output = ask_gemini(prompt)
+    if not output:
+        output = ask_llama(prompt)  # fallback
+
     return output.strip() if output else ("No answer." if lang == "en" else "Няма отговор.")
 
 
