@@ -127,7 +127,7 @@ def index_mongo_to_es():
     # Reindex all collections
     for coll_name in MONGO_COLLECTIONS:
         collection = mongo_db[coll_name]
-        docs = collection.find()
+        docs = collection.find({}, no_cursor_timeout=True).batch_size(200)
         actions = []
         error_count = 0
         total_indexed = 0
@@ -440,7 +440,14 @@ Return ONLY JSON.
             raise ValueError("Incomplete DSL")
 
         if "highlight" not in dsl:
-            dsl["highlight"] = {"fields": {"title": {}, "description": {}}}
+            dsl["highlight"] = {
+                "fields": {
+                    "title": {},
+                    "description": {
+                        "max_analyzed_offset": 999999
+                    }
+                }
+            }
 
         dsl["size"] = dsl.get("size", 100)
         return dsl
