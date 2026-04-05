@@ -1185,6 +1185,15 @@ TEXT:
 
     joined = "\n\n".join(blocks_text)
 
+    MAX_FINAL_CONTEXT_CHARS = 999000
+
+    if len(joined) > MAX_FINAL_CONTEXT_CHARS:
+        joined = joined[:MAX_FINAL_CONTEXT_CHARS]
+
+        last_source = joined.rfind("SOURCE ")
+        if last_source > 0:
+            joined = joined[:last_source]
+
     if lang == "en":
         prompt = f"""
 You are a legal assistant.
@@ -1333,6 +1342,8 @@ async def handle_question(question: str, options: str):
                 ),
             })
 
+
+
     vector_docs = await vector_docs_task
 
     vector_blocks = extract_blocks_from_vector_docs(
@@ -1348,7 +1359,7 @@ async def handle_question(question: str, options: str):
         all_candidate_blocks,
         key=lambda x: x.get("local_score", 0),
         reverse=True
-    )[:10]
+    )
 
     if all_candidate_blocks:
         answer = await final_answer_from_blocks(question, all_candidate_blocks, lang=lang)
@@ -1380,6 +1391,7 @@ async def handle_question(question: str, options: str):
         "results_count": len(all_candidate_blocks),
         "summary": answer,
         "sources": sources,
+        "matches": [b["content"] for b in all_candidate_blocks],
         "matches": [
             {
                 "content": b["content"],
