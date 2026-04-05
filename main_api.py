@@ -455,6 +455,7 @@ def _chat_cache_key(messages: list[dict], temperature: float) -> str:
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
+
 async def groq_final_summary(prompt: str) -> str:
     try:
         completion = groq_client.chat.completions.create(
@@ -467,6 +468,8 @@ async def groq_final_summary(prompt: str) -> str:
     except Exception as e:
         print(f"❌ Groq final summary failed: {e}")
         raise RuntimeError("Groq final summary failed") from e
+
+
 async def ask_gemini_summary(prompt: str) -> str:
     try:
         response = await asyncio.to_thread(gemini_model.generate_content, prompt)
@@ -477,6 +480,8 @@ async def ask_gemini_summary(prompt: str) -> str:
     except Exception as e:
         print(f"❌ Gemini final summary failed: {e}")
         raise RuntimeError("Gemini final summary failed") from e
+
+
 async def ollama_chat(messages: list[dict], temperature: float = 0.1) -> str:
     global http_client
     if http_client is None:
@@ -1328,8 +1333,6 @@ async def handle_question(question: str, options: str):
                 ),
             })
 
-
-
     vector_docs = await vector_docs_task
 
     vector_blocks = extract_blocks_from_vector_docs(
@@ -1377,7 +1380,17 @@ async def handle_question(question: str, options: str):
         "results_count": len(all_candidate_blocks),
         "summary": answer,
         "sources": sources,
-        "matches": [b["content"] for b in all_candidate_blocks],
+        "matches": [
+            {
+                "content": b["content"],
+                "title": b["title"],
+                "index": b["collection"],
+                "article": b.get("article_label", ""),
+                "doc_id": b.get("doc_id", ""),
+                "source_types": b.get("source_types", []),
+            }
+            for b in all_candidate_blocks
+        ],
         "meta": {
             "mode": mode,
             "elastic_blocks": len(es_blocks),
