@@ -36,8 +36,11 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3:70b")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest")
 
+
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_legal")
+ENABLE_CHROMA = os.getenv("ENABLE_CHROMA", "true").lower() == "true"
 os.makedirs(CHROMA_PATH, exist_ok=True)
+
 
 # performance knobs (не променят логиката, само изпълнението)
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "180"))
@@ -199,11 +202,17 @@ async def startup():
         else:
             print("✅ Elasticsearch already has data -> skipping")
 
-        if not chroma_has_any_data():
-            print("📦 Chroma is empty -> indexing...")
-            await index_mongo_to_chroma()
+        if ENABLE_CHROMA:
+            if not chroma_has_any_data():
+                print("📦 Chroma is empty -> indexing...")
+                try:
+                    await index_mongo_to_chroma()
+                except Exception as e:
+                    print(f"⚠️ Skipping Chroma indexing (no embeddings): {e}")
+            else:
+                print("✅ Chroma already has data -> skipping")
         else:
-            print("✅ Chroma already has data -> skipping")
+            print("⏭️ Chroma disabled -> skipping indexing")
 
     except Exception as e:
         print("⚠️ Startup indexing failed:", e)
@@ -821,7 +830,7 @@ Return ONLY JSON:
 }}
 """
 
-    output = await ollama_chat([{"role": "user", "content": prompt.strip()}], temperature=0.1)
+    output = await ask_gemini_summary(prompt.strip())
 
     try:
         parsed = safe_parse_json(output)
@@ -962,7 +971,7 @@ Return ONLY JSON.
 Върни САМО JSON.
 """
 
-    output = await ollama_chat([{"role": "user", "content": prompt.strip()}], temperature=0.1)
+    output = await ask_gemini_summary(prompt.strip())
 
     try:
         json_start = output.find("{")
@@ -1085,35 +1094,41 @@ def block_score(block: str, standalone_question: str, legal_query: str, keywords
 
 async def search_chroma_docs(standalone_question: str, allowed_collections: list[str],
                              n_results: int = VECTOR_DOC_LIMIT) -> list[dict]:
-    question_embedding = (await ollama_embed_texts([standalone_question]))[0]
+    try:
+        question_embedding = (await ollama_embed_texts([standalone_question]))[0]
 
-    results = chroma_collection.query(
-        query_embeddings=[question_embedding],
-        n_results=min(n_results, CHROMA_QUERY_TOP_K),
-    )
+        results = chroma_collection.query(
+            query_embeddings=[question_embedding],
+            n_results=min(n_results, CHROMA_QUERY_TOP_K),
+        )
 
-    ids = results.get("ids", [[]])[0]
-    docs = results.get("documents", [[]])[0]
-    metas = results.get("metadatas", [[]])[0]
-    distances = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(ids)
+        ids = results.get("ids", [[]])[0]
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(ids)
 
-    allowed_set = set(allowed_collections)
-    out = []
-    for doc_id, document, meta, distance in zip(ids, docs, metas, distances):
-        collection = normalize_to_str(meta.get("collection"))
-        if collection not in allowed_set:
-            continue
+        allowed_set = set(allowed_collections)
+        out = []
+        for doc_id, document, meta, distance in zip(ids, docs, metas, distances):
+            collection = normalize_to_str(meta.get("collection"))
+            if collection not in allowed_set:
+                continue
 
-        out.append({
-            "vector_id": doc_id,
-            "doc_id": normalize_to_str(meta.get("mongo_id")),
-            "title": normalize_to_str(meta.get("title", "Без заглавие")),
-            "collection": collection,
-            "language": normalize_to_str(meta.get("language")),
-            "description": normalize_to_str(document),
-            "distance": distance,
-        })
-    return out
+            out.append({
+                "vector_id": doc_id,
+                "doc_id": normalize_to_str(meta.get("mongo_id")),
+                "title": normalize_to_str(meta.get("title", "Без заглавие")),
+                "collection": collection,
+                "language": normalize_to_str(meta.get("language")),
+                "description": normalize_to_str(document),
+                "distance": distance,
+            })
+        return out
+    except Exception as e:
+
+        print(f"⚠️ Vector search skipped (no Ollama): {e}")
+
+        return []
 
 
 def extract_blocks_from_vector_docs(vector_docs: list[dict], standalone_question: str, legal_query: str,
@@ -1260,13 +1275,16 @@ async def handle_question(question: str, options: str):
     allowed_cols = allowed_collections_for_options(options)
 
     # паралелно стартираме vector търсенето и term extraction
-    vector_docs_task = asyncio.create_task(
-        search_chroma_docs(
-            standalone_question=question,
-            allowed_collections=allowed_cols,
-            n_results=VECTOR_DOC_LIMIT,
+    if ENABLE_CHROMA:
+        vector_docs_task = asyncio.create_task(
+            search_chroma_docs(
+                standalone_question=question,
+                allowed_collections=allowed_cols,
+                n_results=VECTOR_DOC_LIMIT,
+            )
         )
-    )
+    else:
+        vector_docs_task = None
 
     term, matched_indices, failed_terms = await generate_term_with_retries(question, allowed_cols, lang=lang)
 
@@ -1342,9 +1360,10 @@ async def handle_question(question: str, options: str):
                 ),
             })
 
-
-
-    vector_docs = await vector_docs_task
+    if vector_docs_task is not None:
+        vector_docs = await vector_docs_task
+    else:
+        vector_docs = []
 
     vector_blocks = extract_blocks_from_vector_docs(
         vector_docs=vector_docs,
