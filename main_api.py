@@ -1005,7 +1005,7 @@ Return ONLY JSON.
                     }
                 }
             },
-            "size": 100,
+            "size": 200,
         }
         DSL_CACHE[cache_key] = dsl
         return dsl
@@ -1056,7 +1056,7 @@ def search_index_for_term(index_name: str, question: str, term: str, lang: str):
                 }
             }
         },
-        "size": 100,
+        "size": 200,
     }
 
     try:
@@ -1220,7 +1220,16 @@ Question:
 Retrieved legal sources:
 {joined}
 
-Write a clean legal answer in English in markdown.
+Write a detailed, descriptive legal answer in English using markdown.
+Important:
+- Do NOT include a "References" section.
+- Do NOT list regulations, directives, source titles, or retrieved documents.
+- Do NOT cite sources by number.
+- Do NOT write phrases like "(Sources 1, 2, 3)".
+- Do NOT mention source numbers.
+- Use the retrieved sources only as background context.
+- Focus on explaining the legal rule, not on listing where it was found.
+- Answer naturally without source references in parentheses.
 """
     else:
         prompt = f"""
@@ -1233,7 +1242,17 @@ Write a clean legal answer in English in markdown.
 Подадени правни източници:
 {joined}
 
-Напиши ясен правен отговор на български в markdown.
+Напиши подробен, описателен правен отговор на български в markdown.
+
+Важно:
+- Не цитирай източници по номер.
+- Не пиши фрази като "(Sources 1, 2, 3)" или "(Източници 1, 2, 3)".
+- Не споменавай номера на източници.
+- Използвай подадените източници само като контекст.
+- Отговаряй естествено, без препратки в скоби към source номера.
+- Не включвай секция "References", "Източници" или "Препратки".
+- Не изброявай регламенти, директиви, заглавия на източници или намерени документи.
+- Фокусирай се върху правното правило, а не върху това къде е намерено.
 """
 
     answer = await ask_gemini_summary(prompt.strip())
@@ -1244,28 +1263,104 @@ async def fallback_legal_answer(question: str, lang: str):
     if lang == "en":
         prompt = f"""
 You are a legal assistant.
+
 Answer ONLY if the question is legal.
+If it is not legal, say that you can only answer legal questions.
 
 Question:
 "{question}"
 
-Write a clean legal answer in markdown.
+Write a clear, practical legal answer in English using markdown.
+Do not mention missing sources.
+Do not mention Elasticsearch, Chroma, RAG, database, retrieved documents, or fallback.
 """
     else:
         prompt = f"""
 Ти си правен асистент.
-Отговаряй САМО ако въпросът е правен.
+
+Отговори САМО ако въпросът е правен.
+Ако не е правен, кажи, че можеш да отговаряш само на правни въпроси.
 
 Въпрос:
 "{question}"
 
-Напиши ясен правен отговор в markdown.
+Напиши ясен, практически правен отговор на български в markdown.
+Не споменавай липсващи източници.
+Не споменавай Elasticsearch, Chroma, RAG, база данни, намерени документи или fallback.
 """
 
     answer = await ask_gemini_summary(prompt.strip())
     return answer.strip()
 
+async def is_answer_sufficient(question: str, answer: str, lang: str) -> dict:
+    if lang == "en":
+        prompt = f"""
+You are an answer quality evaluator.
 
+User question:
+"{question}"
+
+Assistant answer:
+"{answer}"
+
+Decide whether the answer directly and sufficiently answers the user's question.
+
+Important:
+- If the answer says it cannot answer because the provided sources do not contain enough information, then it is NOT sufficient.
+- If the answer mostly explains why it cannot answer, then it is NOT sufficient.
+- If the answer gives a clear legal explanation that answers the question, then it is sufficient.
+- Evaluate only whether the answer satisfies the user's question, not whether it cites sources.
+
+Return ONLY valid JSON:
+{{
+  "is_sufficient": true,
+  "reason": "short reason"
+}}
+"""
+    else:
+        prompt = f"""
+Ти си оценител на качеството на отговор.
+
+Потребителски въпрос:
+"{question}"
+
+Отговор:
+"{answer}"
+
+Прецени дали отговорът директно и достатъчно отговаря на потребителския въпрос.
+
+Важно:
+- Ако отговорът казва, че не може да отговори, защото подадените източници не съдържат информация, тогава НЕ е достатъчен.
+- Ако отговорът основно обяснява защо не може да отговори, тогава НЕ е достатъчен.
+- Ако отговорът дава ясен правен отговор по въпроса, тогава е достатъчен.
+- Оценявай само дали отговорът удовлетворява въпроса, не дали цитира източници.
+
+Върни САМО валиден JSON:
+{{
+  "is_sufficient": true,
+  "reason": "кратка причина"
+}}
+"""
+
+    try:
+        output = await ask_gemini_summary(prompt.strip())
+        parsed = safe_parse_json(output)
+
+        if not parsed:
+            raise ValueError("Gemini evaluator did not return valid JSON")
+
+        return {
+            "is_sufficient": bool(parsed.get("is_sufficient", False)),
+            "reason": normalize_to_str(parsed.get("reason", "")),
+        }
+
+    except Exception as e:
+        print("⚠️ Answer sufficiency check failed:", e)
+
+        return {
+            "is_sufficient": True,
+            "reason": "Evaluator failed, keeping original answer",
+        }
 # =========================================================
 # MAIN PIPELINE
 # =========================================================
@@ -1380,12 +1475,39 @@ async def handle_question(question: str, options: str):
         reverse=True
     )
 
+    answer_check = {
+        "is_sufficient": True,
+        "reason": "",
+    }
+
+    fallback_used = False
+
     if all_candidate_blocks:
         answer = await final_answer_from_blocks(question, all_candidate_blocks, lang=lang)
         mode = "rag"
+
+        answer_check = await is_answer_sufficient(
+            question=question,
+            answer=answer,
+            lang=lang,
+        )
+
+        if not answer_check.get("is_sufficient", True):
+            print("⚠️ RAG answer not sufficient -> using Gemini fallback")
+            print("Reason:", answer_check.get("reason"))
+
+            answer = await fallback_legal_answer(question, lang=lang)
+            mode = "generated_fallback"
+            fallback_used = True
+
     else:
         answer = await fallback_legal_answer(question, lang=lang)
         mode = "generated"
+        fallback_used = True
+        answer_check = {
+            "is_sufficient": False,
+            "reason": "No candidate blocks found",
+        }
     # build sources ONLY from blocks (matches)
     sources_map = {}
 
@@ -1410,7 +1532,6 @@ async def handle_question(question: str, options: str):
         "results_count": len(all_candidate_blocks),
         "summary": answer,
         "sources": sources,
-        "matches": [b["content"] for b in all_candidate_blocks],
         "matches": [
             {
                 "content": b["content"],
@@ -1428,6 +1549,8 @@ async def handle_question(question: str, options: str):
             "vector_docs": len(vector_docs),
             "vector_blocks": len(vector_blocks),
             "final_blocks": len(all_candidate_blocks),
+            "fallback_used": fallback_used,
+            "answer_check": answer_check,
         },
     }
 
